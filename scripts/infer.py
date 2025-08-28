@@ -9,6 +9,7 @@ from peft import PeftModel
 from scripts.utils.model_store import prepare_local_model_dir
 import os
 
+
 # ---------- config ----------
 def deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(a)
@@ -18,6 +19,7 @@ def deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
         else:
             out[k] = v
     return out
+
 
 def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
@@ -29,55 +31,71 @@ def load_config(path: str) -> Dict[str, Any]:
         return deep_merge(base_cfg, run_cfg)
     return run_cfg
 
+
 # ---------- gen ----------
 @torch.inference_mode()
-def generate(model, tok, prompts: List[str], max_new_tokens: int, temperature: float, top_p: float, model_type: str):
-    inputs = tok(prompts, return_tensors="pt", padding=True, truncation=True, max_length=tok.model_max_length)
-    inputs = {k: v.to(model.device) for k,v in inputs.items()}
-    
-    # Set up generation parameters with proper stopping
-    gen_kwargs = dict(
-        max_new_tokens=max_new_tokens, 
-        do_sample=(temperature>0), 
-        temperature=temperature, 
-        top_p=top_p,
-        eos_token_id=tok.eos_token_id,  # Force stop at EOS
-        pad_token_id=tok.eos_token_id if tok.pad_token_id is None else tok.pad_token_id
+def generate(
+    model,
+    tok,
+    prompts: List[str],
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    model_type: str,
+):
+    inputs = tok(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=tok.model_max_length,
     )
-    
-    # Add custom stop tokens for chat template boundaries
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    # Set up generation parameters
+    gen_kwargs = dict(
+        max_new_tokens=max_new_tokens,
+        do_sample=(temperature > 0),
+        temperature=temperature,
+        top_p=top_p,
+        eos_token_id=tok.eos_token_id,
+        pad_token_id=(
+            tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+        ),
+    )
+
+    # Allow generation to stop if the model starts a new user turn.
+    # This covers ChatML-style templates where <|im_start|>user marks
+    # the beginning of the next message.
     if model_type != "seq2seq":
-        # Add </assistant> and <|user|> as additional stop tokens
         stop_tokens = []
-        if hasattr(tok, 'encode'):
-            # Try to encode stop tokens
+        for tkn in ["<|im_start|>user", "<|user|>"]:
             try:
-                user_token = tok.encode("<|user|>", add_special_tokens=False)
-                if user_token:
-                    stop_tokens.extend(user_token)
-                assistant_end_token = tok.encode("</|assistant|>", add_special_tokens=False)
-                if assistant_end_token:
-                    stop_tokens.extend(assistant_end_token)
-            except:
-                pass  # If encoding fails, continue without custom stop tokens
-        
+                ids = tok.encode(tkn, add_special_tokens=False)
+                if len(ids) == 1:
+                    stop_tokens.append(ids[0])
+            except Exception:
+                pass
         if stop_tokens:
-            # Combine EOS token with custom stop tokens
-            all_eos_tokens = [tok.eos_token_id] + stop_tokens
-            gen_kwargs["eos_token_id"] = all_eos_tokens
-    
+            gen_kwargs["eos_token_id"] = [tok.eos_token_id] + stop_tokens
+
     out_ids = model.generate(**inputs, **gen_kwargs)
-    return tok.batch_decode(out_ids, skip_special_tokens=False)  # Keep special tokens for proper parsing
+    return tok.batch_decode(
+        out_ids, skip_special_tokens=False
+    )  # Keep special tokens for proper parsing
+
 
 def load_model_and_tok(cfg, adapters_path: str = None):
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN", None)
     local_model_dir = prepare_local_model_dir(cfg["model"], hf_token=hf_token)
 
-    model_name = local_model_dir   # from now on, load FROM DISK
+    model_name = local_model_dir  # from now on, load FROM DISK
     trust_remote_code = bool(cfg["model"].get("trust_remote_code", False))
     model_type = cfg["model"]["type"]  # "causal" | "seq2seq"
 
-    tok = AutoTokenizer.from_pretrained(model_name, use_fast=True, trust_remote_code=trust_remote_code)
+    tok = AutoTokenizer.from_pretrained(
+        model_name, use_fast=True, trust_remote_code=trust_remote_code
+    )
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token if tok.eos_token else "<|pad|>"
 
@@ -87,16 +105,26 @@ def load_model_and_tok(cfg, adapters_path: str = None):
         try:
             chat_template = Path(template_path).read_text().strip()
             # Set the chat template on the tokenizer to ensure consistency
-            if hasattr(tok, 'chat_template'):
+            if hasattr(tok, "chat_template"):
                 tok.chat_template = chat_template
                 print(f"[infer] loaded chat template from {template_path}")
         except Exception as e:
             print(f"[infer] warning: failed to load chat template: {e}")
 
     if model_type == "seq2seq":
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto", trust_remote_code=trust_remote_code)
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            trust_remote_code=trust_remote_code,
+        )
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto", trust_remote_code=trust_remote_code)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            trust_remote_code=trust_remote_code,
+        )
 
     # attach adapters if path exists
     if adapters_path and Path(adapters_path).exists():
@@ -109,51 +137,62 @@ def load_model_and_tok(cfg, adapters_path: str = None):
     model.eval()
     return model, tok
 
+
 def render_prompt(tmpl: Template, system_txt: str, user_txt: str) -> str:
     return tmpl.render(system=(system_txt or "").strip(), user=user_txt.strip()).strip()
 
+
 def clean_generated_text(text: str, model_type: str) -> str:
-    """Clean generated text by extracting only the assistant response from the full generation."""
+    """Clean generated text by extracting only the assistant response."""
     if model_type == "seq2seq":
         return text.strip()
-    
-    # For causal models, extract everything after the last <|assistant|> tag
-    # and stop at the first <|user|> boundary (if any)
+
+    # ChatML-style cleaning: <|im_start|>assistant ... <|im_end|>
+    if "<|im_start|>assistant" in text:
+        reply = text.split("<|im_start|>assistant", 1)[1]
+        if "<|im_end|>" in reply:
+            reply = reply.split("<|im_end|>")[0]
+        return reply.strip()
+
+    # Legacy cleaning using <|assistant|> markers
     if "<|assistant|>" in text:
-        # Split by <|assistant|> and take the last part (the actual response)
         reply = text.split("<|assistant|>")[-1]
-        
-        # Strip everything after first <|user|> boundary
         if "<|user|>" in reply:
             reply = reply.split("<|user|>")[0]
-        
-        # Also stop at </|assistant|> if present
         if "</|assistant|>" in reply:
             reply = reply.split("</|assistant|>")[0]
-        
         return reply.strip()
-    
-    # Fallback: if no assistant tag found, try to clean common patterns
-    # Remove system and user sections if they got regenerated
+
+    # Fallback: strip any regenerated system/user sections and common patterns
     text = re.sub(r"<\|system\|>.*?</\|system\|>", "", text, flags=re.DOTALL)
     text = re.sub(r"<\|user\|>.*?</\|user\|>", "", text, flags=re.DOTALL)
-    
-    # Also handle other common chat template formats
     text = re.sub(r"User:.*?Assistant:", "", text, flags=re.DOTALL)
     text = re.sub(r"Human:.*?Assistant:", "", text, flags=re.DOTALL)
-    
     return text.strip()
+
 
 # ---------- main ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="configs/config_run.yaml")
-    ap.add_argument("--adapters", default="adapters/last", help="LoRA adapters dir (if used)")
-    ap.add_argument("--mode", choices=["interactive","batch"], default="interactive")
+    ap.add_argument(
+        "--adapters", default="adapters/last", help="LoRA adapters dir (if used)"
+    )
+    ap.add_argument("--mode", choices=["interactive", "batch"], default="interactive")
     ap.add_argument("--input_file", help="Batch: file with one user prompt per line")
-    ap.add_argument("--output_file", default="outputs/preds.txt", help="Batch: where to write generations")
-    ap.add_argument("--system", default="You are a helpful domain assistant.", help="System prompt for inference")
-    ap.add_argument("--max_new_tokens", type=int, help="Override config.gen.max_new_tokens")
+    ap.add_argument(
+        "--output_file",
+        default="outputs/preds.txt",
+        help="Batch: where to write generations",
+    )
+    ap.add_argument(
+        "--system",
+        default="You are a helpful domain assistant.",
+        help="System prompt for inference",
+    )
+    ap.add_argument(
+        "--max_new_tokens", type=int, help="Override config.gen.max_new_tokens"
+    )
     ap.add_argument("--temperature", type=float, help="Override config.gen.temperature")
     ap.add_argument("--top_p", type=float, help="Override config.gen.top_p")
     args = ap.parse_args()
@@ -164,8 +203,8 @@ def main():
     # gen params (allow CLI override)
     gcfg = cfg.get("gen", {})
     max_new_tokens = args.max_new_tokens or int(gcfg.get("max_new_tokens", 200))
-    temperature    = args.temperature or float(gcfg.get("temperature", 0.2))
-    top_p          = args.top_p or float(gcfg.get("top_p", 0.9))
+    temperature = args.temperature or float(gcfg.get("temperature", 0.2))
+    top_p = args.top_p or float(gcfg.get("top_p", 0.9))
 
     model, tok = load_model_and_tok(cfg, adapters_path=args.adapters)
 
@@ -178,13 +217,23 @@ def main():
                 if not user:
                     continue
                 prompt = render_prompt(tmpl, args.system, user)
-                
+
                 # For causal models, append assistant tag to get cleaner generation
-                if cfg["model"]["type"] == "causal" and not prompt.endswith("<|assistant|>"):
-                    prompt += "<|assistant|>"
-                
-                pred = generate(model, tok, [prompt], max_new_tokens, temperature, top_p, cfg["model"]["type"])[0]
-                
+                if cfg["model"]["type"] == "causal" and not prompt.endswith(
+                    "<|im_start|>assistant"
+                ):
+                    prompt += "<|im_start|>assistant"
+
+                pred = generate(
+                    model,
+                    tok,
+                    [prompt],
+                    max_new_tokens,
+                    temperature,
+                    top_p,
+                    cfg["model"]["type"],
+                )[0]
+
                 # Clean the generated text
                 cleaned_pred = clean_generated_text(pred, cfg["model"]["type"])
                 print(f"Model: {cleaned_pred}")
@@ -195,23 +244,43 @@ def main():
         if not args.input_file:
             print("[infer] batch mode requires --input_file", file=sys.stderr)
             sys.exit(1)
-        lines = [ln.strip() for ln in Path(args.input_file).read_text().splitlines() if ln.strip()]
+        lines = [
+            ln.strip()
+            for ln in Path(args.input_file).read_text().splitlines()
+            if ln.strip()
+        ]
         prompts = [render_prompt(tmpl, args.system, u) for u in lines]
-        
+
         # For causal models, append assistant tag to get cleaner generation
         if cfg["model"]["type"] == "causal":
-            prompts = [p + "<|assistant|>" if not p.endswith("<|assistant|>") else p for p in prompts]
-        
-        preds = generate(model, tok, prompts, max_new_tokens, temperature, top_p, cfg["model"]["type"])
-        
+            prompts = [
+                (
+                    p + "<|im_start|>assistant"
+                    if not p.endswith("<|im_start|>assistant")
+                    else p
+                )
+                for p in prompts
+            ]
+
+        preds = generate(
+            model,
+            tok,
+            prompts,
+            max_new_tokens,
+            temperature,
+            top_p,
+            cfg["model"]["type"],
+        )
+
         # Clean all predictions
         cleaned_preds = [clean_generated_text(p, cfg["model"]["type"]) for p in preds]
-        
+
         Path(args.output_file).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_file, "w") as f:
             for p in cleaned_preds:
                 f.write(p.strip() + "\n")
         print(f"[infer] wrote {len(preds)} generations -> {args.output_file}")
+
 
 if __name__ == "__main__":
     main()
