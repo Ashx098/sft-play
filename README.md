@@ -717,4 +717,16 @@ accelerate launch --num_processes 4 scripts/train.py --config configs/run_bnb.ya
 
 The script assigns each rank to its own GPU, disables `device_map="auto"` sharding, and adjusts gradient accumulation so the effective batch size stays consistent across ranks. To limit GPUs, set `CUDA_VISIBLE_DEVICES` or `--nproc_per_node=1`.
 
+**Makefile helpers**
+
+```bash
+# Torchrun backend
+make train-multi NPROC=2 CONFIG=configs/run_bnb.yaml
+
+# Accelerate backend
+make train-accelerate NPROC=4 CONFIG=configs/run_bnb.yaml
+```
+
+`NPROC` defaults to the number of visible GPUs. Override `CONFIG` to pick a different training config.
+
 That's it! The automation system makes SFT-Play truly plug-and-play. Run `make help` to see all available commands, or start with `./workflows/quick_start.sh` for a guided experience.
