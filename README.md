@@ -30,6 +30,7 @@ Single config, QLoRA/LoRA/Full switches, bitsandbytes/Unsloth backends, Jinja ch
 * **Data pipeline** — raw → structured chat (`system,user,assistant`) → Jinja render on-the-fly.
 * **UI** — **TensorBoard** only (loss/metrics/LR; optional GPU stats).
 * **Model Caching** - Automatically download models from Hugging Face Hub and cache them locally.
+* **Flexible GPU scaling** — uses one GPU by default, or many via `torchrun`/`accelerate`.
 * **Tiny checkpoints** — LoRA adapters only (~50-200 MB vs. full model's multiple GB).
 * **Complete automation** — Makefile + workflows for zero-config setup.
 
@@ -689,5 +690,43 @@ make full-pipeline            # Process all data
 make eval-quick               # Fast validation
 make infer                    # Test interactively
 ```
+
+### GPU scaling: one or many
+
+`scripts/train.py` uses Hugging Face's `Trainer`. It runs on a single GPU out of the box and can scale to multiple GPUs when launched with standard PyTorch tools.
+
+**Single GPU (default)**
+
+```bash
+python scripts/train.py --config configs/run_bnb.yaml
+# or pick a specific device
+CUDA_VISIBLE_DEVICES=1 python scripts/train.py --config configs/run_bnb.yaml
+```
+
+If only one GPU is visible, the script uses it automatically. When no GPU is available, it falls back to CPU (slow).
+
+**Multiple GPUs (data parallel)**
+
+```bash
+# Two GPUs on one machine
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 scripts/train.py --config configs/run_bnb.yaml
+
+# Four processes via Accelerate
+accelerate launch --num_processes 4 scripts/train.py --config configs/run_bnb.yaml
+```
+
+The script assigns each rank to its own GPU, disables `device_map="auto"` sharding, and adjusts gradient accumulation so the effective batch size stays consistent across ranks. To limit GPUs, set `CUDA_VISIBLE_DEVICES` or `--nproc_per_node=1`.
+
+**Makefile helpers**
+
+```bash
+# Torchrun backend
+make train-multi NPROC=2 CONFIG=configs/run_bnb.yaml
+
+# Accelerate backend
+make train-accelerate NPROC=4 CONFIG=configs/run_bnb.yaml
+```
+
+`NPROC` defaults to the number of visible GPUs. Override `CONFIG` to pick a different training config.
 
 That's it! The automation system makes SFT-Play truly plug-and-play. Run `make help` to see all available commands, or start with `./workflows/quick_start.sh` for a guided experience.

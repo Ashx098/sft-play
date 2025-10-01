@@ -6,6 +6,10 @@ CONFIG ?= configs/run_bnb.yaml
 # Style prompt (can be overridden)
 STYLE ?= "Answer concisely in 2 lines. No markdown. If unsure, say 'Not sure'."
 
+# Number of processes for distributed training
+# Defaults to all visible GPUs (or 1 if none detected)
+NPROC ?= $(shell python -c "import torch,os;print(torch.cuda.device_count() or 1)" 2>/dev/null || echo 1)
+
 # ---- TensorBoard config ----
 TB_PORT ?= 6006
 TB_LOGDIR ?= $(shell realpath outputs/tb)
@@ -23,13 +27,15 @@ help:
 	@echo "  render        Render chat templates to seq2seq format"
 	@echo ""
 	@echo "Training & Evaluation:"
-	@echo "  train         Start training with current config"
-	@echo "  train-bnb     Start training with BitsAndBytes backend"
-	@echo "  train-unsloth Start training with Unsloth backend"
-	@echo "  train-with-tb Start training with TensorBoard monitoring"
-	@echo "  train-bnb-tb  Start BitsAndBytes training with TensorBoard"
-	@echo "  train-unsloth-tb Start Unsloth training with TensorBoard"
-	@echo "  eval          Evaluate trained model (validation set)"
+        @echo "  train         Start training with current config"
+        @echo "  train-bnb     Start training with BitsAndBytes backend"
+        @echo "  train-unsloth Start training with Unsloth backend"
+        @echo "  train-with-tb Start training with TensorBoard monitoring"
+        @echo "  train-bnb-tb  Start BitsAndBytes training with TensorBoard"
+        @echo "  train-unsloth-tb Start Unsloth training with TensorBoard"
+        @echo "  train-multi    Start distributed training with torchrun"
+        @echo "  train-accelerate Start distributed training with Accelerate"
+        @echo "  eval          Evaluate trained model (validation set)"
 	@echo "  eval-test     Evaluate on test set"
 	@echo "  eval-val      Evaluate on validation set"
 	@echo "  eval-quick    Quick evaluation (200 samples)"
@@ -148,8 +154,16 @@ train-bnb:
 	PYTHONPATH=. python scripts/train.py --config configs/run_bnb.yaml
 
 train-unsloth:
-	@echo "Starting training with Unsloth backend (XFormers disabled)..."
-	XFORMERS_DISABLED=1 UNSLOTH_DISABLE_FAST_ATTENTION=1 PYTHONPATH=. python scripts/train.py --config configs/run_unsloth.yaml
+        @echo "Starting training with Unsloth backend (XFormers disabled)..."
+        XFORMERS_DISABLED=1 UNSLOTH_DISABLE_FAST_ATTENTION=1 PYTHONPATH=. python scripts/train.py --config configs/run_unsloth.yaml
+
+train-multi:
+        @echo "Starting distributed training on $(NPROC) GPU(s)..."
+        torchrun --nproc_per_node=$(NPROC) scripts/train.py --config $(CONFIG)
+
+train-accelerate:
+        @echo "Starting distributed training with Accelerate on $(NPROC) GPU(s)..."
+        accelerate launch --num_processes $(NPROC) scripts/train.py --config $(CONFIG)
 
 ## train-with-tb: Train + print how to launch TB
 train-with-tb:
@@ -157,10 +171,10 @@ train-with-tb:
 	PYTHONPATH=. python scripts/train.py --config $(CONFIG)
 	@echo ""
 	@echo "✅ Training finished. To view logs:"
-	@echo "   make tensorboard TB_PORT=$(TB_PORT)"
+        @echo "   make tensorboard TB_PORT=$(TB_PORT)"
 
 train-bnb-tb:
-	@echo "Starting BitsAndBytes training with TensorBoard..."
+        @echo "Starting BitsAndBytes training with TensorBoard..."
 	@mkdir -p outputs/tb
 	@pkill -f tensorboard || true
 	@nohup tensorboard --logdir $(TB_LOGDIR) --port $(TB_PORT) --host 0.0.0.0 >/dev/null 2>&1 &
@@ -169,15 +183,15 @@ train-bnb-tb:
 	PYTHONPATH=. python scripts/train.py --config configs/run_bnb.yaml
 	@echo ""
 	@echo "✅ Training finished. TensorBoard is still running at:"
-	@echo "   http://localhost:$(TB_PORT)"
-	@echo "   To stop TensorBoard: make tb-stop"
+        @echo "   http://localhost:$(TB_PORT)"
+        @echo "   To stop TensorBoard: make tb-stop"
 
 train-unsloth-tb:
 	@echo "Starting Unsloth training with TensorBoard..."
 	@mkdir -p outputs/tb
 	@pkill -f tensorboard || true
 	@nohup tensorboard --logdir $(TB_LOGDIR) --port $(TB_PORT) --host 0.0.0.0 >/dev/null 2>&1 &
-	@sleep 2
+        @sleep 2
 	@echo "📈 TensorBoard started at http://localhost:$(TB_PORT)"
 	XFORMERS_DISABLED=1 UNSLOTH_DISABLE_FAST_ATTENTION=1 PYTHONPATH=. python scripts/train.py --config configs/run_unsloth.yaml
 	@echo ""
